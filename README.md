@@ -79,7 +79,7 @@ frontend/src/pages                 五个业务页与登录页
 | `GET/PATCH` | `/api/v1/routes/:id` | 线路详情/编辑 |
 | `POST` | `/api/v1/routes/:id/baseline` | 设置基线 |
 | `GET` | `/api/v1/traces` | 轨迹列表 |
-| `POST` | `/api/v1/traces/import` | 导入采样点 |
+| `POST` | `/api/v1/traces/import` | 导入采样点（需 `Idempotency-Key` 请求头） |
 | `GET` | `/api/v1/traces/:id` | 轨迹、处理点和事件 |
 | `POST` | `/api/v1/traces/:id/detect` | 执行事件检测 |
 | `GET` | `/api/v1/events` | 事件筛选 |
@@ -117,6 +117,17 @@ frontend/src/pages                 五个业务页与登录页
 
 状态迁移使用条件更新和 `version` 乐观锁。分析失败回到 `draft` 并保存错误；只有 reviewer/admin 能确认；关闭后不可修改。登录、轨迹导入和分析使用本地内存限流。访问日志不记录 JWT、密码、请求体或完整采样数组。
 
+## 离线轨迹导入的幂等保护
+
+`POST /api/v1/traces/import` 要求客户端在请求头提交 `Idempotency-Key`（1–128 字符，无控制字符；中间件位于限流与 RBAC 之后、字段校验之前）。核心模块位于 `backend/internal/idempotency/`，与 HTTP 框架解耦，可复用给其他写操作：
+
+- **同键同采样**：重复提交（含网络重试）回读首次创建的轨迹，返回 `201` 与完全一致的响应结构，并带响应头 `Idempotency-Replay: true`；不新增轨迹、不新增审计。
+- **同键换采样**：对规范化 JSON 请求体计算 SHA-256 指纹，指纹不一致返回 `409 IDEMPOTENCY_CONFLICT`；原轨迹与不可变审计均保持不变。
+- **并发到达**：进程内按 `(scope, key)` 互斥串行化；跨进程以数据库 `(scope, key)` 唯一索引为最终裁决，同一批并发请求只有一个导入结果，其余等待完成后回读。唯一键去重失效（如旧库缺索引）也不会产生第二条轨迹。
+- **失败回滚**：业务失败时轨迹、审计与幂等记录在同一事务内回滚，键随即释放，客户端可用同键安全重试。
+- 指纹冲突状态：`pending`（首个请求仍在处理，重复请求短暂等待）与 `completed`（回读已建资源）；幂等记录只保存资源类型/ID 与指纹，不复制采样数据。
+- 前端导入对话框为每次逻辑提交生成 UUID 作为幂等键；同一份内容的重复点击/重试复用该键，任何字段修改都会自动换新键。
+
 ## 本地开发与验证
 
 ```bash
@@ -137,6 +148,7 @@ npm --prefix frontend run build
 - 容器未健康：执行 `docker compose logs postgres backend frontend`，首先检查端口占用和 `JWT_SECRET` 长度。
 - 前端 API 返回 502：确认 backend 为 `healthy`，Nginx 通过 Compose 服务名 `backend:8080` 连接。
 - 轨迹导入被拒绝：确认至少 16 点、无 NaN/Inf，采样范围覆盖线路至少 5%，且不超过 `MAX_TRACE_POINTS`。
+- 导入返回 400 缺少键：客户端必须提交 `Idempotency-Key` 请求头；返回 `IDEMPOTENCY_CONFLICT` 表示该键已绑定另一份采样，请用新键或保持原请求体重试。
 - 案例无法分析：基线和当前轨迹均需先执行事件检测。
 - 确认返回 `STATE_CONFLICT`：刷新案例取得最新 `version`，并确认状态为 `pending_review`。
 

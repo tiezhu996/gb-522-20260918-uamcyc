@@ -8,6 +8,7 @@ import (
 
 	"fiber-otdr-fault-localization/backend/internal/algorithm"
 	"fiber-otdr-fault-localization/backend/internal/dto"
+	"fiber-otdr-fault-localization/backend/internal/idempotency"
 	"fiber-otdr-fault-localization/backend/internal/model"
 	"fiber-otdr-fault-localization/backend/internal/repository"
 	"gorm.io/datatypes"
@@ -16,27 +17,35 @@ import (
 type TraceService struct {
 	store     *repository.Store
 	maxPoints int
+	protector *idempotency.Protector
 }
 
-func NewTraceService(store *repository.Store, maxPoints int) *TraceService {
-	return &TraceService{store, maxPoints}
+func NewTraceService(store *repository.Store, maxPoints int, protector *idempotency.Protector) *TraceService {
+	return &TraceService{store, maxPoints, protector}
 }
 
-func (s *TraceService) Import(request dto.ImportTraceRequest, actor Actor) (model.TraceCapture, error) {
+// ImportResult reports the created trace and whether the response was replayed
+// from the first request bound to the idempotency key.
+type ImportResult struct {
+	Trace    model.TraceCapture
+	Replayed bool
+}
+
+func (s *TraceService) Import(request dto.ImportTraceRequest, actor Actor, idempotencyKey string) (ImportResult, error) {
 	if len(request.Points) > s.maxPoints {
-		return model.TraceCapture{}, invalid(fmt.Sprintf("trace exceeds the %d-point limit", s.maxPoints), nil)
+		return ImportResult{}, invalid(fmt.Sprintf("trace exceeds the %d-point limit", s.maxPoints), nil)
 	}
 	for i, point := range request.Points {
 		if math.IsNaN(point) || math.IsInf(point, 0) || point < -200 || point > 100 {
-			return model.TraceCapture{}, invalid(fmt.Sprintf("sample %d is outside the supported dB range", i), nil)
+			return ImportResult{}, invalid(fmt.Sprintf("sample %d is outside the supported dB range", i), nil)
 		}
 	}
 	route, err := s.store.Routes.Get(request.RouteID)
 	if errors.Is(err, repository.ErrNotFound) {
-		return model.TraceCapture{}, notFound("route")
+		return ImportResult{}, notFound("route")
 	}
 	if err != nil {
-		return model.TraceCapture{}, internal("load route failed", err)
+		return ImportResult{}, internal("load route failed", err)
 	}
 	window := request.DenoiseWindow
 	if window == 0 {
@@ -52,33 +61,62 @@ func (s *TraceService) Import(request dto.ImportTraceRequest, actor Actor) (mode
 	}
 	filtered, err := algorithm.MovingMedian(request.Points, window)
 	if err != nil {
-		return model.TraceCapture{}, invalid("trace denoising failed", err)
+		return ImportResult{}, invalid("trace denoising failed", err)
 	}
 	noise, err := algorithm.EstimateNoiseFloor(filtered)
 	if err != nil {
-		return model.TraceCapture{}, &AppError{CodeAlgorithmInput, 422, "not enough trace samples for noise estimation", err}
+		return ImportResult{}, &AppError{CodeAlgorithmInput, 422, "not enough trace samples for noise estimation", err}
 	}
 	lastDistance, err := algorithm.SampleDistance(len(request.Points)-1, request.SampleIntervalNS, route.RefractiveIndex)
 	if err != nil {
-		return model.TraceCapture{}, invalid("distance conversion failed", err)
+		return ImportResult{}, invalid("distance conversion failed", err)
 	}
 	if lastDistance < route.LengthM*0.05 {
-		return model.TraceCapture{}, invalid("trace sampling range covers less than five percent of the route", nil)
+		return ImportResult{}, invalid("trace sampling range covers less than five percent of the route", nil)
 	}
 	raw, _ := json.Marshal(request.Points)
 	processed, _ := json.Marshal(filtered)
 	trace := model.TraceCapture{RouteID: request.RouteID, WavelengthNM: request.WavelengthNM, PulseWidthNS: request.PulseWidthNS, SampleIntervalNS: request.SampleIntervalNS, RawPointsJSON: datatypes.JSON(raw), ProcessedJSON: datatypes.JSON(processed), NoiseFloorDB: noise, CapturedAt: request.CapturedAt, UploadedBy: actor.ID, DenoiseWindow: window, PeakThresholdDB: threshold, MergeWindow: merge}
-	err = s.store.Transaction(func(tx *repository.Store) error {
-		if err := tx.Traces.Create(&trace); err != nil {
-			return err
-		}
-		params := map[string]any{"point_count": len(request.Points), "wavelength_nm": request.WavelengthNM, "denoise_window": window, "peak_threshold_db": threshold, "merge_window": merge}
-		return tx.Audits.Create(audit(actor, "trace.imported", "TraceCapture", trace.ID, &route.ID, "{}", snapshot(params)))
-	})
+	params := map[string]any{"point_count": len(request.Points), "wavelength_nm": request.WavelengthNM, "denoise_window": window, "peak_threshold_db": threshold, "merge_window": merge}
+
+	outcome, err := idempotency.Execute(s.protector, idempotency.ScopeTraceImport, idempotencyKey, request, actor.RequestID,
+		func(tx *repository.Store) (model.TraceCapture, idempotency.ResourceRef, error) {
+			if err := tx.Traces.Create(&trace); err != nil {
+				return model.TraceCapture{}, idempotency.ResourceRef{}, err
+			}
+			entry := audit(actor, "trace.imported", "TraceCapture", trace.ID, &route.ID, "{}", snapshot(params))
+			if err := tx.Audits.Create(entry); err != nil {
+				return model.TraceCapture{}, idempotency.ResourceRef{}, err
+			}
+			return trace, idempotency.NewResourceRef("TraceCapture", trace.ID), nil
+		},
+		func(store *repository.Store, ref idempotency.ResourceRef) (model.TraceCapture, error) {
+			stored, err := store.Traces.Get(ref.ID())
+			if err != nil {
+				return model.TraceCapture{}, err
+			}
+			return stored, nil
+		})
 	if err != nil {
-		return trace, internal("import trace failed", err)
+		return ImportResult{}, mapIdempotencyError(err)
 	}
-	return trace, nil
+	return ImportResult{Trace: outcome.Result, Replayed: outcome.Replayed}, nil
+}
+
+// mapIdempotencyError translates core conflict/pending errors into the
+// existing application error envelope; persistence failures stay 5xx.
+func mapIdempotencyError(err error) error {
+	if coreErr, ok := idempotency.AsError(err); ok {
+		switch coreErr.Code {
+		case idempotency.CodeConflict:
+			return &AppError{Code: coreErr.Code, Status: coreErr.Status, Message: coreErr.Message, Err: coreErr}
+		case idempotency.CodePending:
+			return &AppError{Code: coreErr.Code, Status: coreErr.Status, Message: coreErr.Message, Err: coreErr}
+		case idempotency.CodeInvalid:
+			return &AppError{Code: CodeInvalidInput, Status: coreErr.Status, Message: coreErr.Message, Err: coreErr}
+		}
+	}
+	return internal("import trace failed", err)
 }
 
 func (s *TraceService) List(query dto.TraceQuery) ([]model.TraceCapture, dto.Pagination, error) {

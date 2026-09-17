@@ -5,6 +5,8 @@ import (
 	"time"
 
 	"fiber-otdr-fault-localization/backend/internal/dto"
+	"fiber-otdr-fault-localization/backend/internal/idempotency"
+	appmw "fiber-otdr-fault-localization/backend/internal/middleware"
 	"fiber-otdr-fault-localization/backend/internal/service"
 	"github.com/gin-gonic/gin"
 	"github.com/go-playground/validator/v10"
@@ -44,12 +46,15 @@ func (h *TraceHandler) Import(c *gin.Context) {
 	if !bind(c, h.validate, &request) {
 		return
 	}
-	item, err := h.service.Import(request, actor(c))
+	result, err := h.service.Import(request, actor(c), appmw.IdempotencyKeyFromContext(c))
 	if err != nil {
 		fail(c, err)
 		return
 	}
-	ok(c, http.StatusCreated, item, nil)
+	if result.Replayed {
+		c.Header(idempotency.HeaderReplay, "true")
+	}
+	ok(c, http.StatusCreated, result.Trace, nil)
 }
 
 func (h *TraceHandler) Get(c *gin.Context) {

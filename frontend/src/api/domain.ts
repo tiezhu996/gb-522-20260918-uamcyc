@@ -14,7 +14,7 @@ export const routeApi = {
 export const traceApi = {
   list: (params?: object) => api.get<ApiEnvelope<TraceCapture[]>>('/traces', { params }),
   detail: (id: number) => api.get<ApiEnvelope<TraceEnvelope>>(`/traces/${id}`),
-  import: (body: object) => api.post<ApiEnvelope<TraceCapture>>('/traces/import', body),
+  import: (body: object, idempotencyKey: string) => api.post<ApiEnvelope<TraceCapture>>('/traces/import', body, { headers: { 'Idempotency-Key': idempotencyKey } }),
   detect: (id: number, body: object) => api.post<ApiEnvelope<{ trace_id: number; detected_count: number; noise_floor_db: number; threshold_db: number; rejected_out_of_bounds: number }>>(`/traces/${id}/detect`, body),
 }
 export const eventApi = {

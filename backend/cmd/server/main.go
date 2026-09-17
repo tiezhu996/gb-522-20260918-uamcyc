@@ -12,6 +12,7 @@ import (
 
 	"fiber-otdr-fault-localization/backend/internal/config"
 	"fiber-otdr-fault-localization/backend/internal/handler"
+	"fiber-otdr-fault-localization/backend/internal/idempotency"
 	appmw "fiber-otdr-fault-localization/backend/internal/middleware"
 	"fiber-otdr-fault-localization/backend/internal/repository"
 	"fiber-otdr-fault-localization/backend/internal/router"
@@ -39,9 +40,10 @@ func main() {
 		}
 	}
 	store := repository.NewStore(db)
+	idempotencyProtector := idempotency.NewProtector(store)
 	authService := service.NewAuthService(store, cfg)
 	routeService := service.NewRouteService(store)
-	traceService := service.NewTraceService(store, cfg.MaxTracePoints)
+	traceService := service.NewTraceService(store, cfg.MaxTracePoints, idempotencyProtector)
 	eventService := service.NewEventService(store)
 	caseService := service.NewCaseService(store)
 	auditService := service.NewAuditService(store)

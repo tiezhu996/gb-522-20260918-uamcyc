@@ -9,6 +9,7 @@ import (
 	"sync"
 	"time"
 
+	"fiber-otdr-fault-localization/backend/internal/idempotency"
 	"fiber-otdr-fault-localization/backend/internal/service"
 	"github.com/gin-gonic/gin"
 )
@@ -140,7 +141,7 @@ func CORSMiddleware(origins []string) gin.HandlerFunc {
 		if allowed[origin] {
 			c.Header("Access-Control-Allow-Origin", origin)
 			c.Header("Vary", "Origin")
-			c.Header("Access-Control-Allow-Headers", "Authorization, Content-Type, X-Request-ID")
+			c.Header("Access-Control-Allow-Headers", "Authorization, Content-Type, X-Request-ID, Idempotency-Key")
 			c.Header("Access-Control-Allow-Methods", "GET, POST, PATCH, PUT, OPTIONS")
 		}
 		if c.Request.Method == http.MethodOptions {
@@ -153,4 +154,32 @@ func CORSMiddleware(origins []string) gin.HandlerFunc {
 
 func unauthorized(c *gin.Context, message string) {
 	c.AbortWithStatusJSON(http.StatusUnauthorized, gin.H{"error": gin.H{"code": service.CodeUnauthorized, "message": message, "request_id": c.GetString("request_id")}})
+}
+
+// IdempotencyKeyMiddleware requires a well-formed Idempotency-Key header and
+// stores the trimmed key in the request context. It sits after auth/RBAC and
+// before body validation so a missing or malformed key is rejected up front.
+func IdempotencyKeyMiddleware() gin.HandlerFunc {
+	return func(c *gin.Context) {
+		key := strings.TrimSpace(c.GetHeader(idempotency.HeaderIdempotencyKey))
+		if err := idempotency.ValidateKey(key); err != nil {
+			coreErr, _ := idempotency.AsError(err)
+			c.AbortWithStatusJSON(coreErr.Status, gin.H{"error": gin.H{
+				"code":       service.CodeInvalidInput,
+				"message":    coreErr.Message,
+				"request_id": c.GetString("request_id"),
+			}})
+			return
+		}
+		c.Set(idempotency.ContextKey, key)
+		c.Header(idempotency.HeaderIdempotencyKey, key)
+		c.Next()
+	}
+}
+
+// IdempotencyKeyFromContext reads the validated key placed by the middleware.
+func IdempotencyKeyFromContext(c *gin.Context) string {
+	value, _ := c.Get(idempotency.ContextKey)
+	key, _ := value.(string)
+	return key
 }

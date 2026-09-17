@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"strings"
 
 	"fiber-otdr-fault-localization/backend/internal/config"
 	"fiber-otdr-fault-localization/backend/internal/constants"
@@ -17,14 +18,20 @@ import (
 
 var ErrNotFound = errors.New("record not found")
 
+// ErrIdempotencyKeyExists is returned when an INSERT races an existing
+// (scope, key) document. Callers treat it as "another request owns the key"
+// and replay-by-reference or conflict instead of creating a second resource.
+var ErrIdempotencyKeyExists = errors.New("idempotency key already exists")
+
 type Store struct {
-	DB     *gorm.DB
-	Users  *UserRepository
-	Routes *FiberRouteRepository
-	Traces *TraceRepository
-	Events *EventRepository
-	Cases  *CaseRepository
-	Audits *AuditRepository
+	DB            *gorm.DB
+	Users         *UserRepository
+	Routes        *FiberRouteRepository
+	Traces        *TraceRepository
+	Events        *EventRepository
+	Cases         *CaseRepository
+	Audits        *AuditRepository
+	Idempotencies *IdempotencyRepository
 }
 
 func Open(cfg config.Config) (*gorm.DB, error) {
@@ -48,7 +55,7 @@ func Open(cfg config.Config) (*gorm.DB, error) {
 }
 
 func NewStore(db *gorm.DB) *Store {
-	return &Store{DB: db, Users: &UserRepository{db}, Routes: &FiberRouteRepository{db}, Traces: &TraceRepository{db}, Events: &EventRepository{db}, Cases: &CaseRepository{db}, Audits: &AuditRepository{db}}
+	return &Store{DB: db, Users: &UserRepository{db}, Routes: &FiberRouteRepository{db}, Traces: &TraceRepository{db}, Events: &EventRepository{db}, Cases: &CaseRepository{db}, Audits: &AuditRepository{db}, Idempotencies: &IdempotencyRepository{db}}
 }
 
 func (s *Store) Transaction(fn func(*Store) error) error {
@@ -67,7 +74,7 @@ func (s *Store) Ping(ctx context.Context) error {
 }
 
 func MigrateAndSeed(db *gorm.DB) error {
-	if err := db.AutoMigrate(&model.User{}, &model.FiberRoute{}, &model.TraceCapture{}, &model.EventMarker{}, &model.LocalizationCase{}, &model.AuditLog{}); err != nil {
+	if err := db.AutoMigrate(&model.User{}, &model.FiberRoute{}, &model.TraceCapture{}, &model.EventMarker{}, &model.LocalizationCase{}, &model.AuditLog{}, &model.IdempotencyRecord{}); err != nil {
 		return fmt.Errorf("auto migrate: %w", err)
 	}
 	accounts := []struct{ username, display, role string }{{"analyst", "分析员", constants.RoleAnalyst}, {"reviewer", "复核员", constants.RoleReviewer}, {"admin", "系统管理员", constants.RoleAdmin}}
@@ -114,4 +121,60 @@ func (r *UserRepository) FindByID(id uint) (model.User, error) {
 		return user, fmt.Errorf("find user by id: %w", err)
 	}
 	return user, nil
+}
+
+// IdempotencyRepository owns the durable request-deduplication documents.
+type IdempotencyRepository struct{ db *gorm.DB }
+
+// CreatePending inserts the pending ownership row. A unique-index violation
+// is normalized to ErrIdempotencyKeyExists so the core never depends on
+// driver-specific error strings.
+func (r *IdempotencyRepository) CreatePending(record *model.IdempotencyRecord) error {
+	record.Status = model.IdempotencyStatusPending
+	if err := r.db.Create(record).Error; err != nil {
+		if isDuplicateKeyError(err) {
+			return ErrIdempotencyKeyExists
+		}
+		return fmt.Errorf("create idempotency record: %w", err)
+	}
+	return nil
+}
+
+// Complete finalizes the owned row inside the same transaction.
+func (r *IdempotencyRepository) Complete(id uint, resourceType string, resourceID uint) error {
+	result := r.db.Model(&model.IdempotencyRecord{}).Where("id = ?", id).Updates(map[string]any{
+		"status":        model.IdempotencyStatusCompleted,
+		"resource_type": resourceType,
+		"resource_id":   resourceID,
+	})
+	if result.Error != nil {
+		return fmt.Errorf("complete idempotency record: %w", result.Error)
+	}
+	if result.RowsAffected == 0 {
+		return fmt.Errorf("complete idempotency record: %w", ErrNotFound)
+	}
+	return nil
+}
+
+// Get retrieves a record by scope and key.
+func (r *IdempotencyRepository) Get(scope, key string) (model.IdempotencyRecord, error) {
+	var record model.IdempotencyRecord
+	if err := r.db.Where("scope = ? AND key = ?", scope, key).First(&record).Error; err != nil {
+		if errors.Is(err, gorm.ErrRecordNotFound) {
+			return record, ErrNotFound
+		}
+		return record, fmt.Errorf("get idempotency record: %w", err)
+	}
+	return record, nil
+}
+
+func isDuplicateKeyError(err error) bool {
+	if errors.Is(err, gorm.ErrDuplicatedKey) {
+		return true
+	}
+	message := strings.ToLower(err.Error())
+	// PostgreSQL unique_violation 23505 and mattn/go-sqlite3 UNIQUE constraint.
+	return strings.Contains(message, "duplicate key value") ||
+		strings.Contains(message, "unique constraint failed") ||
+		strings.Contains(message, "23505")
 }
