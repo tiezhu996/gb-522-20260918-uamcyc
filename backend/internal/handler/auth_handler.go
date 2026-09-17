@@ -4,6 +4,7 @@ import (
 	"errors"
 	"net/http"
 	"strconv"
+	"strings"
 
 	"fiber-otdr-fault-localization/backend/internal/dto"
 	"fiber-otdr-fault-localization/backend/internal/service"
@@ -79,6 +80,17 @@ func actor(c *gin.Context) service.Actor {
 	roleString, _ := role.(string)
 	usernameString, _ := username.(string)
 	return service.Actor{ID: userID, Username: usernameString, Role: roleString, RequestID: c.GetString("request_id")}
+}
+
+// idempotencyKey reads the optional Idempotency-Key header. An absent header
+// disables deduplication; an overlong one is rejected as invalid input.
+func idempotencyKey(c *gin.Context) (string, bool) {
+	key := strings.TrimSpace(c.GetHeader("Idempotency-Key"))
+	if len(key) > 128 {
+		fail(c, &service.AppError{Code: service.CodeInvalidInput, Status: http.StatusBadRequest, Message: "Idempotency-Key header must not exceed 128 characters"})
+		return "", false
+	}
+	return key, true
 }
 
 func queryUint(c *gin.Context, key string) *uint {

@@ -41,7 +41,7 @@ func main() {
 	store := repository.NewStore(db)
 	authService := service.NewAuthService(store, cfg)
 	routeService := service.NewRouteService(store)
-	traceService := service.NewTraceService(store, cfg.MaxTracePoints)
+	traceService := service.NewTraceService(store, cfg.MaxTracePoints, service.NewIdempotencyGuard(store))
 	eventService := service.NewEventService(store)
 	caseService := service.NewCaseService(store)
 	auditService := service.NewAuditService(store)

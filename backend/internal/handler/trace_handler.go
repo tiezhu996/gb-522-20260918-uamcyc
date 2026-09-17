@@ -44,10 +44,17 @@ func (h *TraceHandler) Import(c *gin.Context) {
 	if !bind(c, h.validate, &request) {
 		return
 	}
-	item, err := h.service.Import(request, actor(c))
+	key, valid := idempotencyKey(c)
+	if !valid {
+		return
+	}
+	item, replayed, err := h.service.Import(request, actor(c), key)
 	if err != nil {
 		fail(c, err)
 		return
+	}
+	if replayed {
+		c.Header("Idempotency-Replayed", "true")
 	}
 	ok(c, http.StatusCreated, item, nil)
 }

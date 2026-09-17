@@ -18,13 +18,14 @@ import (
 var ErrNotFound = errors.New("record not found")
 
 type Store struct {
-	DB     *gorm.DB
-	Users  *UserRepository
-	Routes *FiberRouteRepository
-	Traces *TraceRepository
-	Events *EventRepository
-	Cases  *CaseRepository
-	Audits *AuditRepository
+	DB          *gorm.DB
+	Users       *UserRepository
+	Routes      *FiberRouteRepository
+	Traces      *TraceRepository
+	Events      *EventRepository
+	Cases       *CaseRepository
+	Audits      *AuditRepository
+	Idempotency *IdempotencyRepository
 }
 
 func Open(cfg config.Config) (*gorm.DB, error) {
@@ -42,13 +43,20 @@ func Open(cfg config.Config) (*gorm.DB, error) {
 	if err != nil {
 		return nil, fmt.Errorf("obtain sql database: %w", err)
 	}
-	sqlDB.SetMaxOpenConns(20)
-	sqlDB.SetMaxIdleConns(5)
+	if cfg.DBDriver == "sqlite" {
+		// SQLite allows one writer and shared-cache readers block on table
+		// locks; a single connection serializes access instead of failing
+		// with SQLITE_BUSY/SQLITE_LOCKED under concurrent imports.
+		sqlDB.SetMaxOpenConns(1)
+	} else {
+		sqlDB.SetMaxOpenConns(20)
+		sqlDB.SetMaxIdleConns(5)
+	}
 	return db, nil
 }
 
 func NewStore(db *gorm.DB) *Store {
-	return &Store{DB: db, Users: &UserRepository{db}, Routes: &FiberRouteRepository{db}, Traces: &TraceRepository{db}, Events: &EventRepository{db}, Cases: &CaseRepository{db}, Audits: &AuditRepository{db}}
+	return &Store{DB: db, Users: &UserRepository{db}, Routes: &FiberRouteRepository{db}, Traces: &TraceRepository{db}, Events: &EventRepository{db}, Cases: &CaseRepository{db}, Audits: &AuditRepository{db}, Idempotency: &IdempotencyRepository{db}}
 }
 
 func (s *Store) Transaction(fn func(*Store) error) error {
@@ -67,7 +75,7 @@ func (s *Store) Ping(ctx context.Context) error {
 }
 
 func MigrateAndSeed(db *gorm.DB) error {
-	if err := db.AutoMigrate(&model.User{}, &model.FiberRoute{}, &model.TraceCapture{}, &model.EventMarker{}, &model.LocalizationCase{}, &model.AuditLog{}); err != nil {
+	if err := db.AutoMigrate(&model.User{}, &model.FiberRoute{}, &model.TraceCapture{}, &model.EventMarker{}, &model.LocalizationCase{}, &model.AuditLog{}, &model.IdempotencyRecord{}); err != nil {
 		return fmt.Errorf("auto migrate: %w", err)
 	}
 	accounts := []struct{ username, display, role string }{{"analyst", "分析员", constants.RoleAnalyst}, {"reviewer", "复核员", constants.RoleReviewer}, {"admin", "系统管理员", constants.RoleAdmin}}

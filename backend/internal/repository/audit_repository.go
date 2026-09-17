@@ -1,6 +1,7 @@
 package repository
 
 import (
+	"errors"
 	"fmt"
 	"strings"
 
@@ -47,4 +48,24 @@ func (r *AuditRepository) List(query dto.AuditQuery) ([]model.AuditLog, int64, e
 		return nil, 0, fmt.Errorf("list audit logs: %w", err)
 	}
 	return entries, total, nil
+}
+
+type IdempotencyRepository struct{ db *gorm.DB }
+
+func (r *IdempotencyRepository) Find(scope string, actorID uint, key string) (model.IdempotencyRecord, error) {
+	var record model.IdempotencyRecord
+	if err := r.db.Where("scope = ? AND actor_id = ? AND idempotency_key = ?", scope, actorID, key).First(&record).Error; err != nil {
+		if errors.Is(err, gorm.ErrRecordNotFound) {
+			return record, ErrNotFound
+		}
+		return record, fmt.Errorf("find idempotency record: %w", err)
+	}
+	return record, nil
+}
+
+func (r *IdempotencyRepository) Create(record *model.IdempotencyRecord) error {
+	if err := r.db.Create(record).Error; err != nil {
+		return fmt.Errorf("create idempotency record: %w", err)
+	}
+	return nil
 }

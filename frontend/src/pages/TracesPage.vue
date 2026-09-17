@@ -9,18 +9,19 @@ import { useTraceStore } from '@/stores/traces'
 import { useRouteStore } from '@/stores/routes'
 import { useAuth } from '@/hooks/useAuth'
 
-const traces = useTraceStore(); const routes = useRouteStore(); const auth = useAuth(); const routeFilter = ref<number>(); const importOpen = ref(false); const busy = ref(false)
+const traces = useTraceStore(); const routes = useRouteStore(); const auth = useAuth(); const routeFilter = ref<number>(); const importOpen = ref(false); const busy = ref(false); const importKey = ref('')
 const form = reactive({ route_id: 0, wavelength_nm: 1550, pulse_width_ns: 100, sample_interval_ns: 100, captured_at: new Date().toISOString(), denoise_window: 5, peak_threshold_db: 0.8, merge_window: 3, points_text: '' })
 const selectedRoute = computed(() => routes.items.find((item) => item.id === traces.selected?.trace.route_id))
 function samplePoints() { const points = Array.from({ length: 240 }, (_, i) => Number((28 - i * .035 - (i >= 62 ? 2.8 : 0) - (i >= 154 ? 4.6 : 0) + Math.sin(i*.37)*.08).toFixed(3))); form.points_text = points.join(', '); form.captured_at = new Date().toISOString() }
 async function filter() { await traces.fetch({ route_id: routeFilter.value, page_size: 100 }); if (traces.items[0]) await traces.select(traces.items[0].id) }
-async function importTrace() { busy.value = true; try { const points = form.points_text.split(/[\s,;]+/).filter(Boolean).map(Number); await traces.importTrace({ ...form, points, captured_at: new Date(form.captured_at).toISOString() }); importOpen.value = false; ElMessage.success(`已导入 ${points.length} 个采样点`) } finally { busy.value = false } }
+function openImport() { importKey.value = crypto.randomUUID(); importOpen.value = true; samplePoints() }
+async function importTrace() { busy.value = true; try { const points = form.points_text.split(/[\s,;]+/).filter(Boolean).map(Number); await traces.importTrace({ ...form, points, captured_at: new Date(form.captured_at).toISOString() }, importKey.value); importOpen.value = false; ElMessage.success(`已导入 ${points.length} 个采样点`) } finally { busy.value = false } }
 async function detect() { if (!traces.selected) return; busy.value = true; try { const result = await traces.detect(traces.selected.trace.id, { denoise_window: form.denoise_window, peak_threshold_db: form.peak_threshold_db, merge_window: form.merge_window }); ElMessage.success(`检出 ${result.detected_count} 个有效事件`) } finally { busy.value = false } }
 onMounted(async () => { await routes.fetch({ page_size:100 }); if (routes.items[0]) form.route_id = routes.items[0].id; await filter() })
 </script>
 
 <template>
-  <PageHeader title="轨迹分析" eyebrow="TRACE ANALYSIS" description="重放原始采样，调整阈值并检视事件证据。"><el-button v-if="auth.canAnalyze()" type="primary" @click="importOpen=true; samplePoints()"><Upload :size="16" />导入轨迹</el-button></PageHeader>
+  <PageHeader title="轨迹分析" eyebrow="TRACE ANALYSIS" description="重放原始采样，调整阈值并检视事件证据。"><el-button v-if="auth.canAnalyze()" type="primary" @click="openImport"><Upload :size="16" />导入轨迹</el-button></PageHeader>
   <section class="content-band trace-workspace">
     <aside class="trace-index data-surface">
       <div class="index-head"><strong>轨迹列表</strong><el-select v-model="routeFilter" clearable placeholder="全部线路" size="small" @change="filter"><el-option v-for="route in routes.items" :key="route.id" :label="route.route_code" :value="route.id" /></el-select></div>

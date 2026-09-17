@@ -79,7 +79,7 @@ frontend/src/pages                 五个业务页与登录页
 | `GET/PATCH` | `/api/v1/routes/:id` | 线路详情/编辑 |
 | `POST` | `/api/v1/routes/:id/baseline` | 设置基线 |
 | `GET` | `/api/v1/traces` | 轨迹列表 |
-| `POST` | `/api/v1/traces/import` | 导入采样点 |
+| `POST` | `/api/v1/traces/import` | 导入采样点（支持 `Idempotency-Key` 幂等键） |
 | `GET` | `/api/v1/traces/:id` | 轨迹、处理点和事件 |
 | `POST` | `/api/v1/traces/:id/detect` | 执行事件检测 |
 | `GET` | `/api/v1/events` | 事件筛选 |
@@ -116,6 +116,8 @@ frontend/src/pages                 五个业务页与登录页
 5. 基线比对：在距离容差内一对一最近匹配，输出新增、消失和损耗增大三类差异与置信度。
 
 状态迁移使用条件更新和 `version` 乐观锁。分析失败回到 `draft` 并保存错误；只有 reviewer/admin 能确认；关闭后不可修改。登录、轨迹导入和分析使用本地内存限流。访问日志不记录 JWT、密码、请求体或完整采样数组。
+
+轨迹导入接受可选的 `Idempotency-Key` 请求头（最长 128 字符，按操作者隔离）：同一键重复提交相同采样时回读首次创建的轨迹并标记响应头 `Idempotency-Replayed: true`；同一键提交不同采样返回 `409 STATE_CONFLICT`。幂等记录与轨迹、审计在同一事务提交，并发重试只会产生一条轨迹和一条审计；不带键的导入行为不变。
 
 ## 本地开发与验证
 

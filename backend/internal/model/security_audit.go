@@ -12,6 +12,21 @@ type User struct {
 	CreatedAt    time.Time `json:"created_at"`
 }
 
+// IdempotencyRecord journals the first accepted request for a client-supplied
+// idempotency key. Keys are scoped per actor so one account can never replay
+// another account's result. The record commits in the same transaction as the
+// resource it points to, so a committed record always references a committed
+// resource and a committed resource created under a key always has its record.
+type IdempotencyRecord struct {
+	ID             uint      `gorm:"primaryKey" json:"id"`
+	Scope          string    `gorm:"size:60;not null;uniqueIndex:idem_scope_actor_key,priority:1" json:"scope"`
+	ActorID        uint      `gorm:"not null;uniqueIndex:idem_scope_actor_key,priority:2" json:"actor_id"`
+	IdempotencyKey string    `gorm:"size:128;not null;uniqueIndex:idem_scope_actor_key,priority:3" json:"idempotency_key"`
+	RequestHash    string    `gorm:"size:64;not null" json:"request_hash"`
+	ResourceID     uint      `gorm:"not null" json:"resource_id"`
+	CreatedAt      time.Time `json:"created_at"`
+}
+
 type AuditLog struct {
 	ID           uint      `gorm:"primaryKey" json:"id"`
 	ActorID      uint      `gorm:"not null;index" json:"actor_id"`
